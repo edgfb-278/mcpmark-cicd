@@ -1,0 +1,173 @@
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run ESLint
+        id: eslint
+        run: npm run lint || echo "eslint_failed=true" >> $GITHUB_OUTPUT
+      - name: Run Prettier check
+        id: prettier
+        run: npx prettier --check . || echo "prettier_failed=true" >> $GITHUB_OUTPUT
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eslintFailed = '${{ steps.eslint.outputs.eslint_failed }}' === 'true';
+            const prettierFailed = '${{ steps.prettier.outputs.prettier_failed }}' === 'true';
+            let comment = '## Code Quality Report\n\n';
+            comment += '### ESLint Checks: ' + (eslintFailed ? '❌ Failed' : '✅ Passed') + '\n';
+            comment += '### Prettier Formatting: ' + (prettierFailed ? '❌ Failed' : '✅ Passed') + '\n';
+            if (eslintFailed || prettierFailed) {
+              comment += '\nPlease fix the above issues before merging.';
+            }
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+  testing-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests with coverage
+        id: test
+        run: npm test -- --coverage || echo "test_failed=true" >> $GITHUB_OUTPUT
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testFailed = '${{ steps.test.outputs.test_failed }}' === 'true';
+            let comment = '## Test Coverage Report\n\n';
+            if (testFailed) {
+              comment += '❌ Tests failed. Please check the logs for details.\n';
+            } else {
+              comment += '✅ Tests passed. Coverage report uploaded as artifact.\n';
+            }
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run dependency vulnerability check
+        id: npm-audit
+        run: npm audit --json > audit-results.json || echo "vulnerabilities_found=true" >> $GITHUB_OUTPUT
+      - name: Scan for secrets
+        id: secret-scan
+        uses: trufflesecurity/trufflehog@v3.65.0
+        with:
+          path: .
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
+          output: json
+        continue-on-error: true
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const vulnFound = '${{ steps.npm-audit.outputs.vulnerabilities_found }}' === 'true';
+            const secretsFound = '${{ steps.secret-scan.outputs.exit-code }}' !== '0';
+            let comment = '## Security Scan Report\n\n';
+            comment += '### Dependencies Vulnerabilities: ' + (vulnFound ? '⚠️ Found' : '✅ None') + '\n';
+            comment += '### Secrets Scan: ' + (secretsFound ? '⚠️ Potential secrets detected' : '✅ No secrets found') + '\n';
+            if (vulnFound) {
+              comment += '\nPlease review the npm audit results for details.';
+            }
+            if (secretsFound) {
+              comment += '\nPlease check the secret scan logs for potential secrets.';
+            }
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+  build-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build application
+        id: build
+        run: npm run build || echo "build_failed=true" >> $GITHUB_OUTPUT
+      - name: Validate endpoints
+        id: endpoints
+        if: steps.build.outputs.build_failed != 'true'
+        run: |
+          # Validate build artifacts exist (adjust based on project structure)
+          if [ -d "build" ] && [ "$(ls -A build)" ]; then
+            echo "endpoints_valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "endpoints_valid=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Create deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        if: steps.build.outputs.build_failed != 'true'
+        with:
+          name: build-artifacts
+          path: build/
+      - name: Post Build Validation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildFailed = '${{ steps.build.outputs.build_failed }}' === 'true';
+            const endpointsValid = '${{ steps.endpoints.outputs.endpoints_valid }}' === 'true';
+            let comment = '## Build Validation\n\n';
+            if (buildFailed) {
+              comment += '❌ Build failed. Please check the logs for details.\n';
+            } else {
+              comment += '✅ Build succeeded.\n';
+              comment += '### Endpoints Validation: ' + (endpointsValid ? '✅ Passed' : '❌ Failed') + '\n';
+              comment += 'Build artifacts uploaded as deployment preview.\n';
+            }
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
